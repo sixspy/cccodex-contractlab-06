@@ -53,6 +53,7 @@ createApp({
     const user=ref(localStorage.getItem('contractlab_user')||'');
     const username=ref('admin'), password=ref('123456'), err=ref(''), tab=ref(0), actionErr=ref('');
     const contracts=ref([]), batches=ref([]), buffers=ref([]), recon=ref({});
+    const ruleBook=ref({}), ledger=ref([]);
     const form=ref({subject:'订单入站', payload_fields:'order_id,amount'});
     const nav=['契约版本','入站校验','双写缓冲','契约对账'];
     function auth(){return {Authorization:'Bearer '+token.value,'Content-Type':'application/json'};}
@@ -79,8 +80,20 @@ createApp({
       batches.value=Array.isArray(b.items)?b.items:[];
       const u=await loadJson('/api/buffers'); if(u===null) return;
       buffers.value=Array.isArray(u.items)?u.items:[];
+      const rb=await loadJson('/api/dequeue/rule-book'); if(rb===null) return;
+      ruleBook.value=rb&&typeof rb==='object'?rb:{};
+      const lg=await loadJson('/api/dequeue/ledger'); if(lg===null) return;
+      ledger.value=Array.isArray(lg.items)?lg.items:[];
       const q=await loadJson('/api/reconcile'); if(q===null) return;
       recon.value=q&&typeof q==='object'?q:{};
+    }
+    async function dequeue(bufId){
+      actionErr.value='';
+      const r=await fetch('/api/dequeue/'+bufId,{method:'POST',headers:auth()});
+      const j=await r.json().catch(()=>({}));
+      if(r.status===401){logout();return;}
+      actionErr.value=r.ok?('出队成功：缓冲#'+j.buffer_id+' 已同事务落正式 #'+j.batch_id):(j.detail||('出队失败 '+r.status));
+      await refresh();
     }
     async function validate(){
       actionErr.value='';
@@ -89,7 +102,7 @@ createApp({
       await refresh();
     }
     onMounted(()=>{if(token.value)refresh();});
-    return {token,user,username,password,err,tab,nav,contracts,batches,buffers,recon,form,actionErr,login,logout,validate};
+    return {token,user,username,password,err,tab,nav,contracts,batches,buffers,recon,ruleBook,ledger,form,actionErr,login,logout,validate,dequeue};
   },
   template:`
   <div v-if="!token" class="login">
@@ -134,12 +147,30 @@ createApp({
     </div>
     <div class="card" v-show="tab===2">
       <h2>双写缓冲</h2>
-      <table><thead><tr><th>缓冲</th><th>批次</th><th>主题</th><th>原因</th></tr></thead>
-      <tbody><tr v-for="b in buffers" :key="b.id"><td>{{b.id}}</td><td>{{b.batch_id}}</td><td>{{b.subject}}</td><td>{{b.reason}}</td></tr></tbody></table>
+      <p class="meta">出队规则簿：{{ruleBook.day}} 当天钉死「{{ruleBook.path}}」路径（{{ruleBook.locked?'已锁定，当天不许换':'未锁定'}}）——删缓冲行与写正式同一事务，同败同成；偏离即拦并记「出队偏了」。</p>
+      <table><thead><tr><th>缓冲</th><th>批次</th><th>主题</th><th>原因</th><th>操作</th></tr></thead>
+      <tbody><tr v-for="b in buffers" :key="b.id">
+        <td>{{b.id}}</td><td>{{b.batch_id}}</td><td>{{b.subject}}</td><td>{{b.reason}}</td>
+        <td><button class="primary" @click="dequeue(b.id)">出队落正式</button></td>
+      </tr>
+      <tr v-if="!buffers.length"><td colspan="5" class="meta">缓冲队列已空，无待出队行</td></tr></tbody></table>
+      <div class="err">{{actionErr}}</div>
+    </div>
+    <div class="card" v-show="tab===2">
+      <h2>出队账册（争用 / 重复 / 偏离留痕）</h2>
+      <table><thead><tr><th>#</th><th>日期</th><th>缓冲</th><th>批次</th><th>路径</th><th>结果</th><th>说明</th></tr></thead>
+      <tbody><tr v-for="l in ledger" :key="l.id">
+        <td>{{l.id}}</td><td>{{l.day}}</td><td>{{l.buffer_id??'—'}}</td><td>{{l.batch_id??'—'}}</td>
+        <td>{{l.path}}</td>
+        <td><span class="stamp" :class="{bad:l.outcome!=='出队成功'}">{{l.outcome}}</span></td>
+        <td>{{l.detail}}</td>
+      </tr>
+      <tr v-if="!ledger.length"><td colspan="7" class="meta">尚无出队记录</td></tr></tbody></table>
     </div>
     <div class="card" v-show="tab===3">
       <h2>契约对账摘要</h2>
-      <p>入站 {{recon.ingress_total}} · 通过 {{recon.passed}} · 缓冲 {{recon.buffered}} · 拒收 {{recon.rejected}} · 缓冲行 {{recon.buffer_rows}} · 对齐 {{recon.aligned}}</p>
+      <p>入站 {{recon.ingress_total}} · 通过 {{recon.passed}} · 缓冲 {{recon.buffered}} · 拒收 {{recon.rejected}} · 缓冲行 {{recon.buffer_rows}} · 已出队 {{recon.dequeued}} · 对齐 {{recon.aligned}}</p>
+      <p class="meta">缓冲队列行数与 result=缓冲 批次数始终相等；出队成功一笔则正式通过 +1、缓冲行 -1，同事务提交，详情、列表与账册同源。</p>
     </div>
   </div>`
 }).mount('#app');
